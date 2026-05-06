@@ -441,7 +441,8 @@ while True:
         dx = robot["x"] - estimated_pose["x"]
         dy = robot["y"] - estimated_pose["y"]
         position_error = math.sqrt(dx * dx + dy * dy)
-        error_percent = (position_error / max_distance) * 100
+
+    error_percent = (position_error / max_distance) * 100
     
     if position_error is not None:
         if action_taken:
