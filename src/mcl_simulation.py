@@ -4,6 +4,8 @@ import math
 import random as rd
 from scipy.ndimage import binary_dilation
 
+# -------------------- PARAMETERS --------------------
+
 robot_radius = 8
 num_particles = 200
 move_noise = 0.3
@@ -14,31 +16,41 @@ turn_step = 0.1
 sigma = 40.0
 spread_threshold = 20
 angle_threshold = 0.8
-resample_keep_ratio = 0.75
+resample_keep_ratio = 0.80
 position_jitter = 6
 angle_jitter = 0.12
 
-map_img = cv2.imread("map/map_processed.png", 0) #loading map in grayscale
+# -------------------- MAP SETUP --------------------
+
+map_img = cv2.imread("map/map_processed.png", 0) # loading map in grayscale
 
 if map_img is None:
     print("Error: map image was not loaded")
     exit()
 
+# convert map image to binary grid
+# 1 = wall/obstacle, 0 = free space
 grid_map = (map_img > 0).astype(int)
 
 height = grid_map.shape[0]
 width = grid_map.shape[1]
+
+# used to convert raw position error into percentage
 max_distance = math.sqrt(width * width + height * height)
 
+# create circular kernel based on robot size
 kernel_size = robot_radius * 2 + 1
 y_coords, x_coords = np.ogrid[-robot_radius:robot_radius+1, -robot_radius:robot_radius+1]
 circle_kernel = (x_coords**2 + y_coords**2 <= robot_radius**2)
 
+# inflate walls so robot/particles do not get too close to obstacles
 wall_mask = (grid_map == 1)
 inflated_walls = binary_dilation(wall_mask, structure=circle_kernel)
 valid_map = ~inflated_walls  # True = safe to place robot/particle
 
-#generate random particles
+# -------------------- PARTICLE FUNCTIONS --------------------
+
+# generate random particles in valid map locations
 def generate_random_particles(num_particles, grid_map, robot_radius):
     particles = []
 
@@ -58,6 +70,7 @@ def generate_random_particles(num_particles, grid_map, robot_radius):
 
     return particles
 
+# keep angle between -pi and pi
 def normalize_angle(theta):
     while theta > math.pi:
         theta -= 2 * math.pi
@@ -67,6 +80,7 @@ def normalize_angle(theta):
 
     return theta
 
+# move each particle using the same action as the robot, plus noise
 def move_particles(particles, move_amount, turn_amount, grid_map, robot_radius):
     for particle in particles:
         noisy_move = move_amount + rd.uniform(-move_noise,move_noise)
@@ -82,7 +96,7 @@ def move_particles(particles, move_amount, turn_amount, grid_map, robot_radius):
             particle["theta"] = new_theta
 
 
-#giving weights to particles
+# give higher weights to particles whose sensor readings match the robot
 def calculate_particle_weight(particle, robot_distances, sensor_offsets, grid_map, max_sensor_distance):
     particle_distances = get_all_sensor_distances(
         particle["x"],
@@ -95,17 +109,19 @@ def calculate_particle_weight(particle, robot_distances, sensor_offsets, grid_ma
 
     squared_error_sum = 0.0
 
+    # compare real robot sensor readings with particle sensor readings
     for i in range(len(robot_distances)):
         error = robot_distances[i] - particle_distances[i]
         squared_error_sum += error * error
 
     mean_squared_error = squared_error_sum / len(robot_distances)
 
+    # convert error into weight
     weight = math.exp(-mean_squared_error / (2 * sigma * sigma))
 
     return weight
 
-#resampling particles
+# resample particles based on their weights
 def resample_particles(particles):
     weights = []
 
@@ -114,6 +130,7 @@ def resample_particles(particles):
 
     total_weight = sum(weights)
 
+    # if all particles are bad, restart randomly
     if total_weight == 0:
         return generate_random_particles(num_particles, grid_map, robot_radius)
 
@@ -125,6 +142,7 @@ def resample_particles(particles):
     keep_count = int(num_particles * resample_keep_ratio)
     random_count = num_particles - keep_count
 
+    # build cumulative weights for systematic resampling
     cumulative_weights = []
     accumulated_weight = 0.0
 
@@ -138,6 +156,7 @@ def resample_particles(particles):
     chosen_particles = []
     index = 0
 
+    # choose particles according to weight
     for i in range(keep_count):
         pointer = start + i * step
 
@@ -148,6 +167,7 @@ def resample_particles(particles):
 
     new_particles = []
 
+    # add small random jitter to chosen particles
     for particle in chosen_particles:
         new_x = particle["x"] + rd.randint(-position_jitter, position_jitter)
         new_y = particle["y"] + rd.randint(-position_jitter, position_jitter)
@@ -170,6 +190,7 @@ def resample_particles(particles):
 
         new_particles.append(new_particle)
 
+    # add some random particles to keep diversity
     random_particles = generate_random_particles(random_count, grid_map, robot_radius)
 
     for particle in random_particles:
@@ -178,7 +199,9 @@ def resample_particles(particles):
     return new_particles
 
 
-#function for checking whether the robot is in valid position
+# -------------------- POSITION AND ROBOT FUNCTIONS --------------------
+
+# check whether robot/particle position is valid
 def is_valid_position(x, y, grid_map, robot_radius):
     if x - robot_radius < 0 or x + robot_radius >= width:
         return False
@@ -186,7 +209,7 @@ def is_valid_position(x, y, grid_map, robot_radius):
         return False
     return bool(valid_map[y, x])
 
-#generate random position for robot
+# generate random valid starting position for robot
 def generate_random_robot(grid_map, robot_radius):
     valid_coordinates = False
 
@@ -206,18 +229,22 @@ def generate_random_robot(grid_map, robot_radius):
 
     return robot
 
+# initialize robot and particles
 robot = generate_random_robot(grid_map, robot_radius)
 print(robot)
 
 particles = generate_random_particles(num_particles, grid_map, robot_radius)
 
-#sensor function(measures distance)
+# -------------------- SENSOR FUNCTIONS --------------------
+
+# cast one sensor ray and return distance to nearest wall
 def get_sensor_distance(x, y, theta, grid_map, max_distance):
     steps = np.arange(0, max_distance)
 
     xs = (x + steps * math.cos(theta)).astype(int)
     ys = (y + steps * math.sin(theta)).astype(int)
 
+    # check which ray points are inside the map
     valid = (
         (xs >= 0) &
         (xs < grid_map.shape[1]) &
@@ -227,12 +254,14 @@ def get_sensor_distance(x, y, theta, grid_map, max_distance):
 
     invalid_indices = np.where(valid == False)[0]
 
+    # stop ray when it leaves map boundary
     if len(invalid_indices) > 0:
         first_invalid = invalid_indices[0]
         xs = xs[:first_invalid]
         ys = ys[:first_invalid]
         steps = steps[:first_invalid]
 
+    # find first wall hit
     hits = np.where(grid_map[ys, xs] == 1)[0]
 
     if len(hits) > 0:
@@ -243,6 +272,9 @@ def get_sensor_distance(x, y, theta, grid_map, max_distance):
 
     return max_distance
 
+
+
+# create sensor directions around robot
 sensor_offsets = []
 
 num_sensor_rays = 15
@@ -251,6 +283,9 @@ for i in range(num_sensor_rays):
     angle = -math.pi + i * (2 * math.pi / num_sensor_rays)
     sensor_offsets.append(angle)
 
+
+
+# get distances for all sensor rays
 def get_all_sensor_distances(x, y, theta, sensor_offsets, grid_map, max_sensor_distance):
     distances = []
 
@@ -261,6 +296,9 @@ def get_all_sensor_distances(x, y, theta, sensor_offsets, grid_map, max_sensor_d
 
     return distances
 
+# -------------------- ESTIMATION FUNCTIONS --------------------
+
+# estimate robot pose using weighted average of particles
 def estimate_pose(particles):
     total_weight = 0.0
 
@@ -293,6 +331,7 @@ def estimate_pose(particles):
 
     return estimated_pose
 
+# measure how spread out particles are around estimate
 def calculate_position_spread(particles, estimated_pose):
     total_weight = 0.0
 
@@ -315,6 +354,7 @@ def calculate_position_spread(particles, estimated_pose):
 
     return weighted_distance_sum
 
+# measure how similar particle directions are
 def calculate_angle_concentration(particles):
     total_weight = 0.0
 
@@ -337,17 +377,20 @@ def calculate_angle_concentration(particles):
 
     return concentration
 
-#main loop
-while True:
-    display = cv2.cvtColor(map_img, cv2.COLOR_GRAY2BGR) #convert map into 3 channel color image
+# -------------------- MAIN LOOP --------------------
 
+while True:
+    # convert map to color image for drawing
+    display = cv2.cvtColor(map_img, cv2.COLOR_GRAY2BGR)
+
+    # draw all particles
     for particle in particles:
         cv2.circle(display, (particle["x"], particle["y"]), 2, (255, 0, 255), -1)
 
-    #draw filled red circle at the robot position
+    # draw real robot position
     cv2.circle(display, (robot["x"], robot["y"]), robot_radius, (0, 0, 255), -1)
 
-    #draw robot's direction line
+    # draw real robot direction line
     line_length = 20
     end_x = int(robot["x"] + line_length * math.cos(robot["theta"]))
     end_y = int(robot["y"] + line_length * math.sin(robot["theta"]))
@@ -356,53 +399,60 @@ while True:
 
     key = cv2.waitKey(50)
 
+    # default movement values before key press
     new_x = robot["x"]
     new_y = robot["y"]
     move_amount = 0
     turn_amount = 0
 
-    #controls
+    # -------------------- CONTROLS --------------------
+
     action_taken = False
-    if key == ord('w'): #move forward
+
+    if key == ord('w'): # move forward
         move_amount = move_step
         new_x += int(move_step*math.cos(robot["theta"]))
         new_y += int(move_step*math.sin(robot["theta"]))
         action_taken = True
 
-    elif key == ord('s'): #move backward
+    elif key == ord('s'): # move backward
         move_amount = -move_step
         new_x -= int(move_step*math.cos(robot["theta"]))
         new_y -= int(move_step*math.sin(robot["theta"]))
         action_taken = True
     
-    elif key == ord('a'): #rotate left
+    elif key == ord('a'): # rotate left
         turn_amount = -turn_step
         robot["theta"] = normalize_angle(robot["theta"] + turn_amount)
         action_taken = True
 
-    elif key == ord('d'): #rotate right
+    elif key == ord('d'): # rotate right
         turn_amount = turn_step
         robot["theta"] = normalize_angle(robot["theta"] + turn_amount)
         action_taken = True
 
-    elif key == ord('r'):
+    elif key == ord('r'): # reset robot and particles
         robot = generate_random_robot(grid_map, robot_radius)
         particles = generate_random_particles(num_particles, grid_map, robot_radius)
         continue
 
-    elif key == 27: #esc key
+    elif key == 27: # esc key
         break
 
+    # move robot only if new position is valid
     if is_valid_position(new_x,new_y,grid_map, robot_radius):
         robot["x"] = new_x
         robot["y"] = new_y
 
+    # move particles after robot action
     if action_taken:
         move_particles(particles, move_amount, turn_amount, grid_map, robot_radius)
 
-    #sensor
+    # -------------------- SENSOR UPDATE --------------------
+
     max_sensor_distance = max(width, height)
 
+    # get real robot sensor measurements
     robot_distances = get_all_sensor_distances(
         robot["x"],
         robot["y"],
@@ -414,9 +464,11 @@ while True:
     if action_taken:
         print("Sensor distances:", robot_distances)
 
+    # update each particle's weight
     for particle in particles:
         particle["weight"] = calculate_particle_weight(particle, robot_distances, sensor_offsets, grid_map, max_sensor_distance)
     
+    # estimate pose and confidence values
     estimated_pose = estimate_pose(particles)
     position_spread = calculate_position_spread(particles, estimated_pose)
     angle_concentration = calculate_angle_concentration(particles)
@@ -435,12 +487,16 @@ while True:
             print("Estimated pose:", estimated_pose)
             print("Position spread:", position_spread)
     
+    # -------------------- ERROR CALCULATION --------------------
+
     position_error = None
 
     if estimated_pose is not None:
         dx = robot["x"] - estimated_pose["x"]
         dy = robot["y"] - estimated_pose["y"]
         position_error = math.sqrt(dx * dx + dy * dy)
+
+        # normalize error using map diagonal
         error_percent = (position_error / max_distance) * 100
     
     if position_error is not None:
@@ -457,6 +513,8 @@ while True:
             2
         )
 
+    # -------------------- CONVERGENCE CHECK --------------------
+
     converged = False
 
     if position_spread is not None and angle_concentration is not None:
@@ -471,6 +529,7 @@ while True:
     if action_taken:
         print(status_text)
 
+    # show localization status
     cv2.putText(
         display,
         status_text,
@@ -481,10 +540,15 @@ while True:
         2
     )
 
+    # resample particles after update
     if action_taken:
         particles = resample_particles(particles)
     
+    # -------------------- SENSOR VISUALIZATION --------------------
+
+    # draw sensor rays with transparent overlay
     overlay = display.copy()
+
     for i in range(len(sensor_offsets)):
         sensor_theta = robot["theta"] + sensor_offsets[i]
         sensor_distance = robot_distances[i]
@@ -499,11 +563,13 @@ while True:
     alpha = 0.2  # transparency level
     display = cv2.addWeighted(overlay, alpha, display, 1 - alpha, 0)
 
+    # -------------------- ESTIMATE VISUALIZATION --------------------
+
     if estimated_pose is not None:
-    #draw estimated position (yellow)
+        # draw estimated position
         cv2.circle(display, (estimated_pose["x"], estimated_pose["y"]), 6, (0, 255, 255), -1)
 
-        # draw direction line
+        # draw estimated direction line
         line_length = 20
         end_x = int(estimated_pose["x"] + line_length * math.cos(estimated_pose["theta"]))
         end_y = int(estimated_pose["y"] + line_length * math.sin(estimated_pose["theta"]))
@@ -515,6 +581,7 @@ while True:
             (0, 255, 255),
             2)
 
+    # show real robot coordinates
     real_text = "Real: (" + str(robot["x"]) + ", " + str(robot["y"]) + ")"
 
     cv2.putText(
@@ -528,7 +595,7 @@ while True:
         )
         
     if estimated_pose is not None:
-
+        # show estimated coordinates
         estimate_text = "Estimate: (" + str(estimated_pose["x"]) + ", " + str(estimated_pose["y"]) + ")"
 
         cv2.putText(
@@ -540,6 +607,7 @@ while True:
             (0, 255, 255),
             2)
 
+    # display simulation window
     cv2.imshow("Robot on Map", display)
 
 cv2.destroyAllWindows()
