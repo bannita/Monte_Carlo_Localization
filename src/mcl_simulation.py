@@ -14,11 +14,12 @@ turn_noise = 0.02
 move_step = 5
 turn_step = 0.1
 sigma = 40.0
-spread_threshold = 20
+spread_threshold = 30
 angle_threshold = 0.8
 resample_keep_ratio = 0.80
 position_jitter = 6
 angle_jitter = 0.12
+num_sensor_rays = 15
 
 # -------------------- MAP SETUP --------------------
 
@@ -130,7 +131,7 @@ def resample_particles(particles):
 
     total_weight = sum(weights)
 
-    # if all particles are bad, restart randomly
+    # if all particles are bad restart randomly
     if total_weight == 0:
         return generate_random_particles(num_particles, grid_map, robot_radius)
 
@@ -276,8 +277,6 @@ def get_sensor_distance(x, y, theta, grid_map, max_distance):
 
 # create sensor directions around robot
 sensor_offsets = []
-
-num_sensor_rays = 15
 
 for i in range(num_sensor_rays):
     angle = -math.pi + i * (2 * math.pi / num_sensor_rays)
